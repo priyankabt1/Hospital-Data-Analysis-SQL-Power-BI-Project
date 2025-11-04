@@ -1,0 +1,190 @@
+
+-- Calculate bed utilization rate each week
+SELECT 
+    week,
+    month,
+    Round(((patients_admitted)*100 / (available_beds)),2) AS bed_utilization_rate
+FROM
+    health.services_weekly;
+-- Services with consistent over-demand (requests > available beds for 3+ consecutive weeks)
+WITH demand AS (
+  SELECT
+    service,
+    week,
+    IF(patients_request > available_beds, 1, 0) AS over_demand
+  FROM services_weekly
+),
+streaks AS (
+  SELECT
+    service,
+    week,
+    over_demand,
+    week - ROW_NUMBER() OVER (PARTITION BY service ORDER BY week) AS grp
+  FROM demand
+  WHERE over_demand = 1
+)
+SELECT service,count(*)
+FROM streaks
+GROUP BY service,grp
+HAVING COUNT(*) >= 3
+order by service;
+-- Weeks with highest patient refusals
+SELECT 
+    Week, service, patients_refused
+FROM
+    services_weekly
+ORDER BY patients_refused DESC
+LIMIT 5;
+-- Average hospital stay for each service
+SELECT 
+  service,
+  ROUND(AVG(DATEDIFF(departure_date, arrival_date)), 2) AS avg_stay_days
+FROM patients
+GROUP BY service
+ORDER BY avg_stay_days DESC;
+-- Service with highest average satisfaction
+SELECT 
+  service,
+  ROUND(AVG(satisfaction), 2) AS avg_satisfaction
+FROM patients
+GROUP BY service
+ORDER BY avg_satisfaction DESC
+LIMIT 1;
+-- Total patients admitted per month
+SELECT 
+  DATE_FORMAT(arrival_date, '%Y-%m') AS month,
+  COUNT(*) AS total_patients
+FROM patients
+GROUP BY month
+ORDER BY month;
+-- Age distribution by department
+SELECT 
+  service,
+  CASE 
+    WHEN age < 18 THEN 'Child'
+    WHEN age BETWEEN 18 AND 40 THEN 'Adult'
+    ELSE 'Senior'
+  END AS age_group,
+  COUNT(*) AS total_patients
+from patients
+GROUP BY service, age_group
+ORDER BY service, age_group;
+-- Attendance percentage per staff
+SELECT 
+    staff_id,staff_name, COUNT(*) AS week_attendence
+FROM
+    health.staff_schedule
+WHERE
+    present = 1
+GROUP BY staff_id,staff_name;
+-- Weekly average attendance by service
+SELECT 
+  week,
+  service,
+  ROUND(AVG(present) * 100, 2) AS avg_attendance
+FROM staff_schedule
+GROUP BY week, service
+ORDER BY week;
+-- Staff with attendance < 80%
+SELECT 
+  staff_id,
+  staff_name,
+  ROUND(AVG(present) * 100, 2) AS attendance_percentage
+FROM staff_schedule
+GROUP BY staff_id, staff_name
+HAVING attendance_percentage < 80
+ORDER BY attendance_percentage;
+-- Weeks where morale < 50 but attendance > 85 %
+SELECT 
+  sw.service,
+  sw.week,
+  ROUND(AVG(ss.present) * 100, 2) AS avg_attendance,
+  sw.staff_morale
+FROM staff_schedule ss
+JOIN services_weekly sw USING (week, service)
+GROUP BY sw.service, sw.week, sw.staff_morale
+HAVING avg_attendance > 85 AND sw.staff_morale < 50;
+-- Compare patient-level vs service-level satisfaction
+SELECT 
+  p.service,
+  ROUND(AVG(p.satisfaction), 2) AS avg_patient_satisfaction,
+  ROUND(AVG(sw.patient_satisfaction), 2) AS avg_service_satisfaction
+FROM patients p
+JOIN services_weekly sw USING (service)
+GROUP BY p.service; 
+-- Weekly efficiency score (attendance + morale + satisfaction)
+SELECT 
+  sw.week,
+  sw.service,
+  ROUND(AVG(ss.present) * 100, 2) AS attendance_rate,
+  sw.staff_morale,
+  sw.patient_satisfaction,
+  ROUND((
+    (AVG(ss.present) * 100 * 0.4) +
+    (sw.staff_morale * 0.3) +
+    (sw.patient_satisfaction * 0.3)), 2) AS efficiency_score
+FROM staff_schedule ss
+JOIN services_weekly sw USING (week, service)
+GROUP BY sw.week, sw.service, sw.staff_morale, sw.patient_satisfaction
+ORDER BY efficiency_score DESC;
+-- Top 3 performing services
+SELECT 
+  service,
+  ROUND(AVG(patient_satisfaction), 2) AS avg_satisfaction,
+  ROUND(AVG(staff_morale), 2) AS avg_morale,
+  ROUND(AVG(patients_admitted * 100.0 / available_beds), 2) AS avg_utilization
+FROM services_weekly
+GROUP BY service
+ORDER BY avg_satisfaction DESC
+LIMIT 3;
+-- Impact of events on satisfaction and morale
+SELECT 
+  event,
+  ROUND(AVG(patient_satisfaction), 2) AS avg_satisfaction,
+  ROUND(AVG(staff_morale), 2) AS avg_morale
+FROM services_weekly
+WHERE event IS NOT NULL AND event <> ''
+GROUP BY event
+ORDER BY avg_satisfaction DESC;
+-- Monthly trend of satisfaction and morale
+Select month,round(avg(patient_satisfaction),2),round(avg(staff_morale),2) from services_weekly group by month;
+-- Morale trend (decline or improvement)
+SELECT 
+  service,
+  week,
+  staff_morale,
+  LAG(staff_morale) OVER (PARTITION BY service ORDER BY week) AS prev_morale,
+  CASE 
+    WHEN staff_morale < LAG(staff_morale) OVER (PARTITION BY service ORDER BY week)
+    THEN 'Decline'
+    ELSE 'Stable/Improved'
+  END AS morale_trend
+FROM services_weekly
+ORDER BY service, week;
+-- Identify service-weeks with both low morale and low satisfaction
+SELECT 
+  service,
+  week,
+  staff_morale,
+  patient_satisfaction
+FROM services_weekly
+WHERE staff_morale < 50 AND patient_satisfaction < 60
+ORDER BY service, week;
+-- Staff-to-patient ratio per service
+SELECT 
+  st.service,
+  COUNT(DISTINCT st.staff_id) AS total_staff,
+  COUNT(DISTINCT p.patient_id) AS total_patients,
+  ROUND(COUNT(DISTINCT p.patient_id) / COUNT(DISTINCT st.staff_id), 2) AS patient_per_staff
+FROM staff st
+JOIN patients p USING (service)
+GROUP BY st.service;
+-- Week-over-week change in patient admissions
+SELECT 
+  service,
+  week,
+  patients_admitted,
+  LAG(patients_admitted) OVER (PARTITION BY service ORDER BY week) AS prev_week_admissions,
+  (patients_admitted - LAG(patients_admitted) OVER (PARTITION BY service ORDER BY week)) AS change_in_admissions
+FROM services_weekly
+ORDER BY service, week;
